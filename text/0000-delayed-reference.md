@@ -7,7 +7,7 @@
 [summary]: #summary
 
 Introduce an additional unnamed type and a corresponding conversion operation
-to references that allows explain the current behaviour of 'borrow-as-ptr'
+to references that allows explain the current behaviour of 'rereference-as-ptr'
 expressions such as `&(*foo).field as *const _`. Also, the resulting MIR will
 not exhibit undefined behaviour. That is, it retroactively makes typical
 statements defined even for packed structs and requires less unsafe.
@@ -24,19 +24,19 @@ reference to the extracted field, it is impossible to soundly retrieve a pointer
 to such.
 
 A [similarly motivated RFC](https://github.com/rust-lang/rfcs/pull/2582) exists
-that tries to approach this problem by adding an operation that performs a
-direct pointer to pointer-to-field conversion in one special syntactical case.
-This has the immediate drawback of leaving some existing code at a state of
-undefined behaviour and introducing UB interact with no-op pointer casts:
+that tries to approach this problem by adding a MIR operation that performs a
+direct pointer to pointer-to-field conversion in a few defined syntactical
+cases.  This has the immediate drawback of leaving some existing code at a
+state of undefined behaviour and introducing UB interact with no-op pointer
+casts:
 
 ```
 // UB, intermediate & is not allowed.
 &packed.field as &T as *const T;
-```
 
-This proposal takes a different approach: Add MIR types and structure so that
-the creation of an actual reference is delayed up to a reasonable point that
-allows casting to a pointer before the reference invariants come into play.
+// UB, throwing away the result is not sound.
+&packed.field;
+```
 
 Another shortcoming of current syntax is that dereferencing a raw pointer always
 requires an `unsafe` block, even when only address calculation to another

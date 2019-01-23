@@ -125,9 +125,12 @@ let y: *mut _ = &x.subfield;
 
 On the level of MIR, a raw reference should be very similar to an actual
 pointer. They are not assumed to have reference properties. Only at the point
-of coercion or cast to reference will the reference semantics start.
-
-For implementation-oriented RFCs (e.g. for compiler internals), this section should focus on how compiler contributors should think about the change, and give examples of its concrete impact. For policy RFCs, this section should provide an example-driven introduction to the policy, and explain its impact in concrete terms.
+of coercion or cast to reference will the reference semantics start. This could
+potentially reuse only existing MIR operators by changing their semantics but
+instead it is proposed to explicitly assign the new expressions a type 
+`&raw _`. If the conversion operation should also be a new instruction is
+mostly a matter of taste, we could also overload the semantics of `as &T` to
+also cast raw references.
 
 # Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
@@ -170,6 +173,78 @@ let x = if  condition {
 };
 ```
 
+Let's talk about error messages, since after this proposal most address
+calculation should be written in safe context. Thus, a good error message
+should be emitted when a program contains a raw reference coercion to reference
+in safe code. This message should allude to explicit requirement of unsafe for
+casting to reference and should note the chain of raw reference types leading
+to this error. Furthermore, there should be different messages when the
+compiler inferred the reference type by ambiguity.
+
+Suppose we forget an `unsafe`, but it is clear that reference type is our only
+option for type deduction. Take the earlier example:
+
+```
+let x =   &packed.field;
+        ^ not in an unsafe block.
+x.foo();
+ ^ type deduction, x determined as reference type.
+```
+
+```
+error[E0000]: unsafe reference to packed field
+  |
+1 |  let x = &packed.field;
+  |        ^ cast to reference requires unsafe { } block
+
+Note: This expression refers to the field of a packed struct. Safe code can
+      only point to such fields but it can not create a reference.
+  |
+1 |  let x = &packed.field;
+  |          ^^^^^^^^^^^^^
+
+Note: reference type inferred here:
+  |
+2 | x.foo();
+  |
+
+```
+
+Compare this to the branch case where reference type is inferred to resolve the
+ambiguity of two different raw reference expressions:
+
+```
+let x = if condition {
+    &packed.field
+} else {
+    &packed.other_field
+};
+```
+
+```
+error[E9999]: implicit unsafe cast to reference type.
+1 |  let x = if condition {
+2 |      &packed.field
+  |      ^^^^^^^^^^^^^ this value is implicitly converted to reference
+3 |  } else {
+
+Note: The reference type was inferred as the type of this expression because no
+      expression supplying the result has a concrete type.
+1 | let x = if condition {
+...         ^^^^^^^^^^^^^^
+3 | } else {
+... ^^^^^^^^
+5 | };
+  | ^^
+
+Note: Maybe you meant to explicitly cast one of them to a pointer?
+1 |  let x = if condition {
+2 |      &packed.field as *const_
+  |                    ^^^^^^^^^^^
+3 |  } else {
+```
+
+
 # Drawbacks
 [drawbacks]: #drawbacks
 
@@ -191,7 +266,7 @@ temporary raw references for some reasons:
   of explicit other concepts inferred from this that any temporary reference
   creation eventually cast to pointer is defined should be considered. This
   reasoning would gain an explicit approval as long as the type is never
-  explicitely cast to/ascribed with/used as a reference.
+  explicitly cast to/ascribed with/used as a reference.
 
 * It provides type-level reasoning powers and definitions that allows removal
   of `unsafe` from safe operations. The operation of dereferencing a pointer to

@@ -7,7 +7,7 @@
 [summary]: #summary
 
 Introduce an additional unnamed type and a corresponding conversion operation
-to references that allows explain the current behaviour of 'rereference-as-ptr'
+to references that safely explain the desired behaviour of 'rereference-as-ptr'
 expressions such as `&(*foo).field as *const _`. Also, the resulting MIR will
 not exhibit undefined behaviour. That is, it retroactively makes typical
 statements defined even for packed structs and requires less unsafe.
@@ -244,7 +244,6 @@ Note: Maybe you meant to explicitly cast one of them to a pointer?
 3 |  } else {
 ```
 
-
 # Drawbacks
 [drawbacks]: #drawbacks
 
@@ -308,20 +307,33 @@ It should be clear what
 # Future possibilities
 [future-possibilities]: #future-possibilities
 
-Think about what the natural extension and evolution of your proposal would
-be and how it would affect the language and project as a whole in a holistic
-way. Try to use this section as a tool to more fully consider all possible
-interactions with the project and language in your proposal.
-Also consider how the this all fits into the roadmap for the project
-and of the relevant sub-team.
+With arbitrary self-types it could become possible to safely call methods on
+the pointer of a place expression in a single statement with the same safe
+syntax. as coercion converts these to pointer type.
 
-This is also a good place to "dump ideas", if they are out of scope for the
-RFC you are writing but otherwise related.
+```
+impl Foo {
+    fn init(self: *mut Self) { }
+}
 
-If you have tried and cannot think of any future possibilities,
-you may simply state that you cannot think of anything.
+union Foobar {
+    _uninit: (),
+    some_struct: Foo,
+}
 
-Note that having something written down in the future-possibilities section
-is not a reason to accept the current or a future RFC; such notes should be
-in the section on motivation or rationale in this or subsequent RFCs.
-The section merely provides additional information.
+let _ = foobar.some_struct.init();
+                         ^^^ methods on a raw reference?
+```
+
+Note that this is *not* proposed here as the method does not name a field.
+It remains open if constructs such as these could also performed safely by
+omitting the intermediate reference coercion, the semantics still remain
+similar to this:
+
+```
+let _t: &_ = &foobar.some_struct;
+        ^^ unsafe coercion to reference here.
+_t.init();
+ ^^^ No such method on type `Foo`
+```
+

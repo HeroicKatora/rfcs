@@ -7,11 +7,12 @@
 [summary]: #summary
 
 Introduce an additional unnamed type and a corresponding conversion operation
-to references that safely explain the desired behaviour of 'rereference-as-ptr'
-expressions such as `&(*foo).field as *const _`. Also, the resulting MIR will
-not exhibit undefined behaviour. That is, it retroactively makes typical
-statements defined even for packed structs and requires less unsafe. The syntax
-is intended to be backwards compatible in a non-breaking manner.
+to references that are sufficient to produce the desired behaviour of
+'rereference-as-ptr' expressions such as `&(*foo).field as *const _` even in
+safe code. Also, the resulting MIR will not exhibit undefined behaviour. That
+is, it retroactively makes typical statements defined even for packed structs
+and requires less unsafe. The syntax is justified to be backwards compatible in
+a non-breaking manner.
 
 # Motivation
 [motivation]: #motivation
@@ -63,7 +64,8 @@ expression has a unique type, similar to closures. It will be safe to
 dereference a pointer for this case, and this case only, while it will still
 remain unsafe to coerce the raw reference to a normal reference. The reference
 to which a raw reference can coerce is unique and we will call it associated
-reference in this document.
+reference in this document. The lifetime of a raw reference is that of its
+associated reference.
 
 For most parts, programmers need not know about raw reference to write code.
 This RFC intends that there should be no way to actually denote this type in
@@ -135,6 +137,7 @@ let x = loop {
 
 let y: *mut _ = &x.subfield;
                 ^^^^^^^^^^^ another raw reference expression.
+       ^^^^^^ coerced here
 ```
 
 On the level of MIR, a raw reference should be very similar to an actual
@@ -273,28 +276,32 @@ raw types, there are three new cases:
   unsafe block, this will fail but this is not a problem since this case can
   not happen for legacy code. Any raw reference in legacy code are created
   within unsafe blocks, and coerced to normal reference when leaving them.
-* This is very similar, we also coerce both to a reference.
-
+* This is very similar, we also coerce both to a reference. Similar reasoning
+  applies why this is backwards compatible within unsafe blocks and never a
+  backware compatible problem outside.
 
 Finally, on the MIR level we make three changes:
 
 1. Introduce a new operator `&[const|mut] raw <place>` to create a new type, a
    `&[const|mut] raw` reference.
 2. Change the compilation of taking a reference to a place through means other
-   than an existing reference to instead emit this new instruction.
-3. Convert the new type to one of `&[mut]` or `*[const|mut]` when it is coerced
-   to one of these in the surface language.
+   than an existing reference to instead emit this new instruction when the
+   resulting borrow has the type of a raw reference.
+3. A dedicated instruction used to turn this into an actual reference, while
+   the existing cast with `a *[const|mut]` when converting to pointer. These
+   are inserted as given by the surface language.
 
 The last change is subject to a decision of simply reusing `as *const` and 
 `&(*place)` operations or introducing a new operator. While the former require
 less changes to MIR, the latter offers the possibility of being an injection
 point for Rust `UBsan`. I argue, that the `&(*)` operator should in MIR only be
-applied to references in the first place.
-
-Since it is at these instructions were references are created out of thin air
-by assertion of the programmer, it would be a primary opportunity to insert
-additional code checking these assertions.
-
+applied to references in the first place. In the way this RFC is formulated, a
+normal reference can *only* be created by reborrowing an existing reference or
+by coercing a raw reference into it. Reborrowing is always safe and coercing
+always requires `unsafe` on the surface. Since coercion is the only instruction
+where references are created out of thin air by assertion of the programmer, it
+would be a primary opportunity to insert additional code checking these
+assertions.
 
 # Drawbacks
 [drawbacks]: #drawbacks
@@ -308,8 +315,10 @@ This increases the number of type considerations in surface level code and MIR.
 # Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
-This design is preferable over a dedicated blessed syntax for creating
-temporary raw references for some reasons:
+An alternative would be to create dedicated new surface level syntax that only
+works on raw pointers to create another raw pointer using a place-like
+expression. This design is preferable over a new syntax for creating temporary
+raw references for some reasons:
 
 Old code that relied on `&packed.field as *const_` and incorrectly from lack of
 explicit other concepts inferred from this that any temporary reference
@@ -318,9 +327,9 @@ reasoning would gain an explicit approval as long as the type is never
 explicitly cast to/ascribed with/used as a reference.
 
 It provides type-level reasoning powers and definitions that allows removal of
-`unsafe` from safe operations. The operation of dereferencing a pointer to a
-pointer to field does not actually dereference anything, it is mainly a
-notational convention inherited from similar languages such as C. This also
+`unsafe` from safe operations. The operation of dereferencing a pointer to
+create a pointer to field does not actually dereference anything, it is mainly
+a notational convention inherited from similar languages such as C. This also
 makes other operations more intuitive, such as safely throwing away the result
 of `&packed.field` without UB.
 
@@ -330,7 +339,6 @@ dedicated to raw address calculation and one for asserting the reference
 properties. There is no longer an overlap with the unconditionally safe
 operation for constructing a reference to a field of place pointed to by
 another reference.
-
 
 # Prior art
 [prior-art]: #prior-art
@@ -358,10 +366,6 @@ changes. In theory, one could replace MIR before implementing the surface level
 changes or one could make the surface level defined by using other MIR
 instructions that do not rely on references to create pointers.
 
-- What parts of the design do you expect to resolve through the RFC process before this gets merged?
-- What parts of the design do you expect to resolve through the implementation of this feature before stabilization?
-- What related issues do you consider out of scope for this RFC that could be addressed in the future independently of the solution that comes out of this RFC?
-
 # Future possibilities
 [future-possibilities]: #future-possibilities
 
@@ -383,10 +387,10 @@ let _ = foobar.some_struct.init();
                          ^^^ methods on a raw reference?
 ```
 
-Note that this is *not* proposed here as the method does not name a field.
-It remains open if constructs such as these could also performed safely by
-omitting the intermediate reference coercion, the semantics still remain
-similar to this:
+Note that this is *not* proposed here as the method-call expression is not a
+place expression.  It remains open if constructs such as these could also
+performed safely by omitting the intermediate reference coercion, the semantics
+still remain similar to this:
 
 ```
 let _t: &_ = &foobar.some_struct;

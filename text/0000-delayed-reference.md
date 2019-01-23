@@ -10,7 +10,8 @@ Introduce an additional unnamed type and a corresponding conversion operation
 to references that safely explain the desired behaviour of 'rereference-as-ptr'
 expressions such as `&(*foo).field as *const _`. Also, the resulting MIR will
 not exhibit undefined behaviour. That is, it retroactively makes typical
-statements defined even for packed structs and requires less unsafe.
+statements defined even for packed structs and requires less unsafe. The syntax
+is intended to be backwards compatible in a non-breaking manner.
 
 # Motivation
 [motivation]: #motivation
@@ -53,18 +54,31 @@ it is treated as safe and does not require `unsafe` scope.
 # Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-First, we introduce the concept of a raw reference (denoted here with `{raw T}`
-and `{raw mut T}`. A raw reference is the type assigned to a `& place`
-expression during type deduction when such an expression refers to a place
-through means other than a direct reference (such as the target of a
-dereference operation `&(*foo*)` or to fields of a union or a packed struct). 
-Similar to integer literals, its type can not be named and only when the actual
-type of a raw reference is needed it will coerce to reference or pointer but
-its type will default to the *associated reference* type when unclear.
+The result of the some borrow expressions is changed to a *raw reference*.
+Specifically, when such a place expression of the form `(*ptr).field` where
+`ptr` is a pointer or a `raw reference`. The type of a raw reference can not be
+named, and it can be coerced to a standard reference or a pointer according to
+context. It is denoted here with `{raw T}` and `{raw mut T}` but every
+expression has a unique type, similar to closures. It will be safe to
+dereference a pointer for this case, and this case only, while it will still
+remain unsafe to coerce the raw reference to a normal reference. The reference
+to which a raw reference can coerce is unique and we will call it associated
+reference in this document.
 
-The current operators for address calculation from places (`*`, `&`, `&mut`,
-`as &`, `as &mut`, `as *const` and `as *mut`, and `.field` expressions) also
-interact with raw references. 
+For most parts, programmers need not know about raw reference to write code.
+This RFC intends that there should be no way to actually denote this type in
+type ascription.  Wherever this would be possible, the reference needs to be
+cast to pointer or default to reference, the latter only being possible in
+`unsafe` context. Since they work in a drop-in manner to actual references, the
+difference will only matter when one needs to reason about the exact point
+where undefined behaviour might happen. This point is delayed compared to
+immediately interpreting borrow expressions as references (hence the RFC name)
+and thus yields a purely stronger definedness guarantee.
+
+The current operators for interact with raw references in the same manner as
+with standard pointers (`*`, `as &`, `as &mut`, `as *const` and `as *mut`, and
+`.field` expressions). This includes that `& (*raw_ref).field` would yield
+another raw reference.
 
 ```
 // Not UB, and safe.
@@ -135,21 +149,17 @@ also cast raw references.
 # Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
 
-Their behaviour for the sake of type deduction each expression will have a
-unique type and the eventual type is determined by their usage only. Their
-default type when under constrained is the corresponding reference type. These
-values coerce implicitely. Allowed are coercion to *associated reference* with
-same mutability and to *associated pointer* also with the same mutability.
-Creation, and interaction and MIR level will be explained next.
+Reference discussion is split in four parts: Firstly, the proposed type nature
+is explained, followed by examples and diagnostics. Then, the backwards
+compatibility is examinated and lastly the MIR level changes are listed, which
+will turn out to be more or less decoupled from the surface syntax.
 
-For most parts, programmers need not know about raw reference to write code.
-This RFC intends that there should be no way to actually denote this type in
-type ascription.  Wherever this would be possible, the reference needs to be
-cast to pointer or default to reference, the latter only being possible in
-`unsafe` context. Since they work in a drop-in manner to actual references, the
-difference will only matter when one needs to reason about the exact point
-where undefined behaviour might happen. This point is delayed (hence the RFC
-name) and thus a purely strong definedness guarantee.
+For the sake of type deduction each expression will have a unique type and the
+eventual type is determined by their usage only. Their default type when under
+constrained is the corresponding reference type. These values coerce
+implicitely. Allowed are coercion to *associated reference* with same
+mutability and to *associated pointer* also with the same mutability.
+Creation, and interaction and MIR level will be explained next.
 
 ```
 // Will not compile in safe, two distinct types and no coercion to `& possible.
@@ -185,6 +195,7 @@ Suppose we forget an `unsafe`, but it is clear that reference type is our only
 option for type deduction. Take the earlier example:
 
 ```
+// Fails to compile!!
 let x =   &packed.field;
         ^ not in an unsafe block.
 x.foo();
@@ -211,9 +222,11 @@ Note: reference type inferred here:
 ```
 
 Compare this to the branch case where reference type is inferred to resolve the
-ambiguity of two different raw reference expressions:
+ambiguity of two different raw reference expressions. Note that this will *not*
+produce an error when it occurs in an unsafe code block.
 
 ```
+// Fails to compile!!
 let x = if condition {
     &packed.field
 } else {
@@ -244,6 +257,45 @@ Note: Maybe you meant to explicitly cast one of them to a pointer?
 3 |  } else {
 ```
 
+Third, I will get into a few more details about the backwards compatibilty of
+this proposal. There is one additional rule for the new type: An unsafe block
+will always coerce its result into a normal reference.
+
+The new expression type can only be coerced to a pointer when this has been
+asserted through direct type ascription. In these cases, a reference would also
+coerce to a pointer. Whenever the compiler has to consider unification of two
+raw types, there are three new cases:
+
+* One is a raw reference while the other is pointer type. In this case, we
+  coerce to pointer just as the reference before would have.
+* One is a raw reference while the other is a reference type. In this case, we
+  coerce to a reference *only because we are in an unsafe block*. Outside of an
+  unsafe block, this will fail but this is not a problem since this case can
+  not happen for legacy code. Any raw reference in legacy code are created
+  within unsafe blocks, and coerced to normal reference when leaving them.
+* This is very similar, we also coerce both to a reference.
+
+
+Finally, on the MIR level we make three changes:
+
+1. Introduce a new operator `&[const|mut] raw <place>` to create a new type, a
+   `&[const|mut] raw` reference.
+2. Change the compilation of taking a reference to a place through means other
+   than an existing reference to instead emit this new instruction.
+3. Convert the new type to one of `&[mut]` or `*[const|mut]` when it is coerced
+   to one of these in the surface language.
+
+The last change is subject to a decision of simply reusing `as *const` and 
+`&(*place)` operations or introducing a new operator. While the former require
+less changes to MIR, the latter offers the possibility of being an injection
+point for Rust `UBsan`. I argue, that the `&(*)` operator should in MIR only be
+applied to references in the first place.
+
+Since it is at these instructions were references are created out of thin air
+by assertion of the programmer, it would be a primary opportunity to insert
+additional code checking these assertions.
+
+
 # Drawbacks
 [drawbacks]: #drawbacks
 
@@ -251,54 +303,60 @@ This proposal complicates type deduction and reasoning. It is no longer clear
 from code flow alone whether an expression will like `& (*place)` will be
 interpreted as reference type, raw reference or eventually coerced to pointer.
 
-
-
-Why should we *not* do this?
+This increases the number of type considerations in surface level code and MIR.
 
 # Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
-This design is preferable over a separate dedicated syntax for creating
+This design is preferable over a dedicated blessed syntax for creating
 temporary raw references for some reasons:
 
-* Old code that relied on `&packed.field as *const_` and incorrectly from lack
-  of explicit other concepts inferred from this that any temporary reference
-  creation eventually cast to pointer is defined should be considered. This
-  reasoning would gain an explicit approval as long as the type is never
-  explicitly cast to/ascribed with/used as a reference.
+Old code that relied on `&packed.field as *const_` and incorrectly from lack of
+explicit other concepts inferred from this that any temporary reference
+creation eventually cast to pointer is defined should be considered. This
+reasoning would gain an explicit approval as long as the type is never
+explicitly cast to/ascribed with/used as a reference.
 
-* It provides type-level reasoning powers and definitions that allows removal
-  of `unsafe` from safe operations. The operation of dereferencing a pointer to
-  a pointer to field does not actually dereference anything, it is mainly a
-  notational convention inherited from similar languages such as C. This also
-  makes other operations more intuitive, such as safely throwing away the
-  result of `&packed.field` without UB.
+It provides type-level reasoning powers and definitions that allows removal of
+`unsafe` from safe operations. The operation of dereferencing a pointer to a
+pointer to field does not actually dereference anything, it is mainly a
+notational convention inherited from similar languages such as C. This also
+makes other operations more intuitive, such as safely throwing away the result
+of `&packed.field` without UB.
 
-- Why is this design the best in the space of possible designs?
-- What other designs have been considered and what is the rationale for not choosing them?
-- What is the impact of not doing this?
+The operation of creating a reference from a non-reference place is always
+explicit in MIR, as the current instructions are separated into two: One
+dedicated to raw address calculation and one for asserting the reference
+properties. There is no longer an overlap with the unconditionally safe
+operation for constructing a reference to a field of place pointed to by
+another reference.
+
 
 # Prior art
 [prior-art]: #prior-art
 
-Discuss prior art, both the good and the bad, in relation to this proposal.
-A few examples of what this can include are:
+An [alternate proposal](https://github.com/rust-lang/rfcs/pull/2582) addresses
+the same underlying concern als with MIR changes. These are not exclusive and
+MIR-only changes are generally preferable to surface language changes. This
+proposal tries to make these changes more consistent at both levels. 
 
-- For language, library, cargo, tools, and compiler proposals: Does this feature exist in other programming languages and what experience have their community had?
-- For community proposals: Is this done by some other community and what were their experiences with it?
-- For other teams: What lessons can we learn from what other communities have done here?
-- Papers: Are there any published papers or great posts that discuss this? If you have some relevant papers to refer to, this can serve as a more detailed theoretical background.
-
-This section is intended to encourage you as an author to think about the lessons from other languages, provide readers of your RFC with a fuller picture.
-If there is no prior art, that is fine - your ideas are interesting to us whether they are brand new or if it is an adaptation from other languages.
-
-Note that while precedent set by other languages is some motivation, it does not on its own motivate an RFC.
-Please also take into consideration that rust sometimes intentionally diverges from common language features.
+The split in MIR instructions, both the new type and its creation, are
+compatible with the mechanisms outlined in that other rfc. We can, mostly, use
+both MIR changes to express the fundamental operation of getting a point to a
+place without going through a reference. The other text is a less intrusive fix
+to the immediate problem of having **no** semantically defined way of achieving
+the require effect. In comparison, the changes here are more fundamental but
+also more principled. We try to avoid `&(*)` in any context where we are not
+positive on the reference nature of our target. The additional guarantees
+asserted by unsafe code are instead expressed via a separate instruction.
 
 # Unresolved questions
 [unresolved-questions]: #unresolved-questions
 
-It should be clear what 
+The MIR instruction design is largely independent of the surface level type
+changes. In theory, one could replace MIR before implementing the surface level
+changes or one could make the surface level defined by using other MIR
+instructions that do not rely on references to create pointers.
 
 - What parts of the design do you expect to resolve through the RFC process before this gets merged?
 - What parts of the design do you expect to resolve through the implementation of this feature before stabilization?

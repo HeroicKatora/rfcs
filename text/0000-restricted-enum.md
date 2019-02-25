@@ -38,32 +38,140 @@ were chosen is revealed at the site of a match on this enum.
 The goal is to elevates the power of enums beyond tag dispatch, improving
 structural induction for marker traits while also allowing more general type
 representations. Trait bounds are allowed on each enum variant where they are
-asserted when constructed and provided to a match expression.
+asserted when constructed and provided to a match expression. Marker traits are
+inferred by inspecting each variant individually with its bounds before
+performing the structural induction otherwise.
 
 ```
+/// Permit passing a value by reference, and a sized value by value.
 enum ValOrRef<'a, T: ?Sized + 'a> {
     Ref(&'a T),
     Val(T) where T: Sized,
 }
 
 impl<'a, T: ?Sized + 'a> ValOrRef<'a, T> {
-    fn as_ref(&self) -> &T {
+    /// This requires `Self: Sized`.
+    fn get(self) -> T where T: Clone {
         match self {
-	    ValOrRef::Ref<___>
+	    ValOrRef::Ref(t) => t.clone(),
+	    ValOrRef::Val(t) => t,
 	}
     }
 }
 ```
 
-Explain the proposal as if it was already included in the language and you were teaching it to another Rust programmer. That generally means:
+An enum variant provides, in a way, a witness for the additional trait bounds
+mentioned in its variant clause. This way, the generic interface of an enum can
+offer a less restricted interface with individual variants providing more
+concrete trait bounds. This provides possibilities similar to runtime
+specialization. A 
 
-- Introducing new named concepts.
-- Explaining the feature largely in terms of examples.
-- Explaining how Rust programmers should *think* about the feature, and how it should impact the way they use Rust. It should explain the impact as concretely as possible.
-- If applicable, provide sample error messages, deprecation warnings, or migration guidance.
-- If applicable, describe the differences between teaching this to existing Rust programmers and new Rust programmers.
+maybe common occurance is an I/O algorithm that can be implemented more
+efficiently with `BufRead` but for which the interface should not depend on it.
+This kind of function is not adequately captured by current specialization and
+would require an additional trait and two impls to dispatch.  Using `enum` for
+this makes everything much clearer and declares the possibilities in a single
+location that can be freely chosen to be part of SemVer or not. Additionally,
+the caller may choose not to use the specialized version (e.g. if they
+determine that some heuristic makes the generic impl more efficient than the
+specialized version for some kind of reader).
 
-For implementation-oriented RFCs (e.g. for compiler internals), this section should focus on how compiler contributors should think about the change, and give examples of its concrete impact. For policy RFCs, this section should provide an example-driven introduction to the policy, and explain its impact in concrete terms.
+```
+pub enum MaybeBuf<T: Read> {
+    Standard(T),
+    Buf(T) where T: BufRead,
+}
+
+pub fn do_io<T: Read>(read: MaybeBuf<T>) {
+    match read {
+        MaybeBuf::Standard(reader) => dispatch_standard(reader),
+	MaybeBuf::Buf(reader) => dispatch_buf(reader),
+    }
+}
+
+fn dispatch_standard<T: Read>(reader: T) { ... }
+fn dispatch_buf<T: BufRead>(reader: T) { ... }
+```
+
+Another common case is encapsulating a related pair of values while permitting
+a size optimization in case the representation for both is already present in a
+single type. This could otherwise be solved with a specialized trait and an
+automatic impl for generic `T` but that route may run into conflicting impl
+blocks, especially if the trait should be implementable by a third-party
+library as well. Using a constrained enum variant to disambiguiate would not
+require a generic and broad impl block and be much more concise:
+
+```
+pub trait Value {
+    fn get(&self) -> usize;
+}
+
+pub trait Named {
+    fn name(&self) -> &str;
+}
+
+pub enum KeyValue<T: Value> {
+    Pair(String, T),
+    SelfNamed(T) where T: Named,
+}
+
+impl<T: Value> KeyValue<T> {
+    fn name(&self) -> &str {
+        match self {
+	    KeyValue::Pair(name, _) => name,
+	    KeyValue::SelfNamed(val) => val.name(),
+	}
+    }
+}
+
+//! Which would otherwise have to look like:
+pub strut Kv<T>(pub T);
+
+pub trait KeyValue: Value {
+    fn name(&self) -> &str;
+}
+
+impl<T: Value + Named> KeyValue for Kv<T> {
+    fn name(&self) -> &str {
+    	self.0.name()
+    }
+}
+
+/// Uh oh, dangerously close to conflicting impl.
+///
+/// tuple (`String`, T) better not be `Value + Named`.
+impl<T: Value> KeyValue for Kv<(String, T)> {
+    fn name(&self) -> &str {
+    	&self.0
+    }
+}
+```
+
+Now that we've seen the use, let us quickly state the straightforward
+restriction on construction. The implicit functions provided by enum tuple
+variants are simple extended to also include their own trait bounds. The
+compiler error message should hint at which bound is violated through something
+like:
+
+```
+pub enum MaybeBuf<T: Read> {
+    Standard(T),
+    Buf(T) where T: BufRead,
+}
+
+fn main() {
+    // Note: stdin() is not buffered like StdinLock.
+    MaybeBuf::Buf(stdin());
+}
+
+error[E0000]: the trait bound `std::io::Stdin: std::io::BufRead` is not satisfied
+ --> src/main.rs:8:8
+  |
+8 |     MaybeBuf::Buf(stdin());
+  |     ^^^^^^^^^^^^^^^^^^^^^^ the trait `std::io::BufRead` is not implemented for `std::io::Stdin`
+  |
+note: required by enum variant `MaybeBuf::Buf` 
+```
 
 # Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation

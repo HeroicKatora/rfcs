@@ -6,8 +6,9 @@
 # Summary
 [summary]: #summary
 
-Add guard clauses to enum variants, widening the number of the structurally
-inferred marker traits and allowing more generic enumerations.
+Add trait bound clauses to enum variants, allowing several additional concise
+code patterns and aligning the structurally inferred marker traits with the sum
+semantics of enums.
 
 # Motivation
 [motivation]: #motivation
@@ -16,7 +17,10 @@ This is perhaps best motivated by an example:
 
 ```
 pub enum Synced<T: Send> {
+    /// The contained value is synced with a mutex.
     MaybeUnsync(Mutex<T>),
+
+    /// The value is already synced on its own.
     Sync(T) where T: Sync,
 }
 
@@ -35,38 +39,14 @@ were chosen is revealed at the site of a match on this enum.
 # Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-The goal is to elevates the power of enums beyond tag dispatch, improving
-structural induction for marker traits while also allowing more general type
-representations. Trait bounds are allowed on each enum variant where they are
-asserted when constructed and provided to a match expression. Marker traits are
-inferred by inspecting each variant individually with its bounds before
-performing the structural induction otherwise.
+Automatic traits and the construction will now consider each enum variant on
+its own. Without a trait bound clause, this is equivalent to the current
+system. But an additional guard clause allows restricting usage of a single
+variant without affecting the generic argument bounds of the enum type itself.
+The extra restrictions are then provided back to the programmer through
+`match`, by allowing access to the gated `impl` when matching that variant.
 
-```
-/// Permit passing a value by reference, and a sized value by value.
-enum ValOrRef<'a, T: ?Sized + 'a> {
-    Ref(&'a T),
-    Val(T) where T: Sized,
-}
-
-impl<'a, T: ?Sized + 'a> ValOrRef<'a, T> {
-    /// This requires `Self: Sized`.
-    fn get(self) -> T where T: Clone {
-        match self {
-	    ValOrRef::Ref(t) => t.clone(),
-	    ValOrRef::Val(t) => t,
-	}
-    }
-}
-```
-
-An enum variant provides, in a way, a witness for the additional trait bounds
-mentioned in its variant clause. This way, the generic interface of an enum can
-offer a less restricted interface with individual variants providing more
-concrete trait bounds. This provides possibilities similar to runtime
-specialization. A 
-
-maybe common occurance is an I/O algorithm that can be implemented more
+A maybe common occurance is an I/O algorithm that can be implemented more
 efficiently with `BufRead` but for which the interface should not depend on it.
 This kind of function is not adequately captured by current specialization and
 would require an additional trait and two impls to dispatch.  Using `enum` for
@@ -175,6 +155,42 @@ note: required by enum variant `MaybeBuf::Buf`
 
 # Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
+
+The goal is to elevates the power of enums beyond tag dispatch, improving
+structural induction for marker traits while also allowing more general type
+representations. Trait bounds are allowed on each enum variant where they are
+asserted when constructed and provided to a match expression. Marker traits are
+inferred by inspecting each variant individually with its bounds before
+performing the structural induction otherwise.
+
+```
+/// Permit passing a value by reference, and a sized value by value.
+///
+/// Note that this type is always `Sized` as each variant is `Sized`.
+enum ValOrRef<'a, T: ?Sized + 'a> {
+    /// `&_` is always sized.
+    Ref(&'a T),
+
+    /// This is sized due to the bound.
+    Val(T) where T: Sized,
+}
+
+impl<'a, T: ?Sized + 'a> ValOrRef<'a, T> {
+    /// This requires `Self: Sized`.
+    fn get(self) -> T where T: Clone {
+        match self {
+	    ValOrRef::Ref(t) => t.clone(),
+	    ValOrRef::Val(t) => t,
+	}
+    }
+}
+```
+
+An enum variant provides, in a way, a witness for the additional trait bounds
+mentioned in its variant clause. This way, the generic interface of an enum can
+offer a less restricted interface with individual variants providing more
+concrete trait bounds. This provides possibilities similar to runtime
+specialization. 
 
 This is the technical portion of the RFC. Explain the design in sufficient detail that:
 
